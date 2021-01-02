@@ -1,0 +1,520 @@
+/*
+ * This file is part of the Pollux Client distribution (https://github.com/PolluxDevelopment/pollux-client/).
+ * Copyright (c) 2020 Pollux Development.
+ */
+
+package rardoger.polluxclient.modules;
+
+import com.mojang.serialization.Lifecycle;
+import me.zero.alpine.event.EventPriority;
+import me.zero.alpine.listener.EventHandler;
+import me.zero.alpine.listener.Listenable;
+import me.zero.alpine.listener.Listener;
+import rardoger.polluxclient.PolluxClient;
+import rardoger.polluxclient.commands.CommandManager;
+import rardoger.polluxclient.events.EventStore;
+import rardoger.polluxclient.events.game.GameJoinedEvent;
+import rardoger.polluxclient.events.game.GameLeftEvent;
+import rardoger.polluxclient.events.game.OpenScreenEvent;
+import rardoger.polluxclient.events.pollux.KeyEvent;
+import rardoger.polluxclient.modules.combat.*;
+import rardoger.polluxclient.modules.movement.Timer;
+import rardoger.polluxclient.modules.misc.*;
+import rardoger.polluxclient.modules.movement.*;
+import rardoger.polluxclient.modules.player.*;
+import rardoger.polluxclient.modules.render.*;
+import rardoger.polluxclient.modules.render.hud.HUD;
+import rardoger.polluxclient.settings.ColorSetting;
+import rardoger.polluxclient.settings.Setting;
+import rardoger.polluxclient.settings.SettingGroup;
+import rardoger.polluxclient.utils.render.color.RainbowColorManager;
+import rardoger.polluxclient.utils.render.color.SettingColor;
+import rardoger.polluxclient.utils.Utils;
+import rardoger.polluxclient.utils.files.Savable;
+import rardoger.polluxclient.utils.misc.input.Input;
+import rardoger.polluxclient.utils.misc.input.KeyAction;
+import rardoger.polluxclient.utils.player.Chat;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.Pair;
+import net.minecraft.util.registry.Registry;
+import net.minecraft.util.registry.RegistryKey;
+import org.lwjgl.glfw.GLFW;
+
+import javax.annotation.Nullable;
+import java.io.File;
+import java.util.*;
+
+public class ModuleManager extends Savable<ModuleManager> implements Listenable {
+    public static final Category[] CATEGORIES = {Category.Combat, Category.Player, Category.Movement, Category.Render, Category.Misc};
+    public static ModuleManager INSTANCE;
+    public static final ModuleRegistry REGISTRY = new ModuleRegistry();
+
+    private final Map<Class<? extends Module>, Module> modules = new HashMap<>();
+    private final Map<Category, List<Module>> groups = new HashMap<>();
+
+    private final List<ToggleModule> active = new ArrayList<>();
+    private Module moduleToBind;
+
+    public boolean onKeyOnlyBinding = false;
+
+    public ModuleManager() {
+        super(new File(PolluxClient.FOLDER, "modules.nbt"));
+
+        INSTANCE = this;
+
+        initCombat();
+        initPlayer();
+        initMovement();
+        initRender();
+        initMisc();
+
+        for (List<Module> modules : groups.values()) {
+            modules.sort(Comparator.comparing(o -> o.title));
+        }
+
+        PolluxClient.EVENT_BUS.subscribe(this);
+    }
+
+    public <T extends Module> T get(Class<T> klass) {
+        return (T) modules.get(klass);
+    }
+
+    public Module get(String name) {
+        for (Module module : modules.values()) {
+            if (module.name.equalsIgnoreCase(name)) return module;
+        }
+
+        return null;
+    }
+
+    public boolean isActive(Class<? extends ToggleModule> klass) {
+        ToggleModule module = get(klass);
+        return module != null && module.isActive();
+    }
+
+    public List<Module> getGroup(Category category) {
+        return groups.computeIfAbsent(category, category1 -> new ArrayList<>());
+    }
+
+    public Collection<Module> getAll() {
+        return modules.values();
+    }
+
+    public List<ToggleModule> getActive() {
+        synchronized (active) {
+            return active;
+        }
+    }
+
+    public void setModuleToBind(Module moduleToBind) {
+        this.moduleToBind = moduleToBind;
+    }
+
+    public List<Pair<Module, Integer>> searchTitles(String text) {
+        List<Pair<Module, Integer>> modules = new ArrayList<>();
+
+        for (Module module : this.modules.values()) {
+            int words = Utils.search(module.title, text);
+            if (words > 0) modules.add(new Pair<>(module, words));
+        }
+
+        modules.sort(Comparator.comparingInt(value -> -value.getRight()));
+        return modules;
+    }
+
+    public List<Pair<Module, Integer>> searchSettingTitles(String text) {
+        List<Pair<Module, Integer>> modules = new ArrayList<>();
+
+        for (Module module : this.modules.values()) {
+            for (SettingGroup sg : module.settings) {
+                for (Setting<?> setting : sg) {
+                    int words = Utils.search(setting.title, text);
+                    if (words > 0) {
+                        modules.add(new Pair<>(module, words));
+                        break;
+                    }
+                }
+            }
+        }
+
+        modules.sort(Comparator.comparingInt(value -> -value.getRight()));
+        return modules;
+    }
+
+    void addActive(ToggleModule module) {
+        synchronized (active) {
+            if (!active.contains(module)) {
+                active.add(module);
+                PolluxClient.EVENT_BUS.post(EventStore.activeModulesChangedEvent());
+            }
+        }
+    }
+
+    void removeActive(ToggleModule module) {
+        synchronized (active) {
+            if (active.remove(module)) {
+                PolluxClient.EVENT_BUS.post(EventStore.activeModulesChangedEvent());
+            }
+        }
+    }
+
+    @EventHandler
+    public Listener<KeyEvent> onKey = new Listener<>(event -> {
+        if (event.action == KeyAction.Repeat) return;
+
+        // Check if binding module
+        if (event.action == KeyAction.Press && moduleToBind != null) {
+            moduleToBind.setKey(event.key);
+            Chat.info("Module (highlight)%s (default)bound to (highlight)%s(default).", moduleToBind.title, Utils.getKeyName(event.key));
+            moduleToBind = null;
+            event.cancel();
+            return;
+        }
+
+        // Find module bound to that key
+        if (!onKeyOnlyBinding && MinecraftClient.getInstance().currentScreen == null && !Input.isPressed(GLFW.GLFW_KEY_F3)) {
+            for (Module module : modules.values()) {
+                if (module.getKey() == event.key && (event.action == KeyAction.Press || module.toggleOnKeyRelease)) {
+                    module.doAction();
+                    if (module instanceof ToggleModule) ((ToggleModule) module).sendToggledMsg();
+                }
+            }
+        }
+    }, EventPriority.HIGHEST + 1);
+
+    @EventHandler
+    private final Listener<OpenScreenEvent> onOpenScreen = new Listener<>(event -> {
+        for (Module module : modules.values()) {
+            if (module.toggleOnKeyRelease && module instanceof ToggleModule) {
+                ToggleModule toggleModule = (ToggleModule) module;
+                if (toggleModule.isActive()) {
+                    toggleModule.toggle();
+                    toggleModule.sendToggledMsg();
+                }
+            }
+        }
+    }, EventPriority.HIGHEST + 1);
+
+    @EventHandler
+    private final Listener<GameJoinedEvent> onGameJoined = new Listener<>(event -> {
+        synchronized (active) {
+            for (ToggleModule module : active) {
+                PolluxClient.EVENT_BUS.subscribe(module);
+                module.onActivate();
+            }
+        }
+    });
+
+    @EventHandler
+    private final Listener<GameLeftEvent> onGameLeft = new Listener<>(event -> {
+        synchronized (active) {
+            for (ToggleModule module : active) {
+                PolluxClient.EVENT_BUS.unsubscribe(module);
+                module.onDeactivate();
+            }
+        }
+    });
+
+    public void disableAll() {
+        synchronized (active) {
+            for (ToggleModule module : active.toArray(new ToggleModule[0])) {
+                module.toggle();
+            }
+        }
+    }
+
+    @Override
+    public CompoundTag toTag() {
+        CompoundTag tag = new CompoundTag();
+
+        ListTag modulesTag = new ListTag();
+        for (Module module : getAll()) {
+            CompoundTag moduleTag = module.toTag();
+            if (moduleTag != null) modulesTag.add(moduleTag);
+        }
+        tag.put("modules", modulesTag);
+
+        return tag;
+    }
+
+    @Override
+    public ModuleManager fromTag(CompoundTag tag) {
+        ListTag modulesTag = tag.getList("modules", 10);
+        for (Tag moduleTagI : modulesTag) {
+            CompoundTag moduleTag = (CompoundTag) moduleTagI;
+            Module module = get(moduleTag.getString("name"));
+            if (module != null) module.fromTag(moduleTag);
+        }
+
+        return this;
+    }
+
+    // INIT MODULES
+
+    private void addModule(Module module) {
+        modules.put(module.getClass(), module);
+        getGroup(module.category).add(module);
+
+        CommandManager.getDispatcher().register(module.buildCommand());
+
+        for (SettingGroup group : module.settings) {
+            for (Setting<?> setting : group) {
+                if (module instanceof ToggleModule) setting.module = (ToggleModule) module;
+
+                if (setting instanceof ColorSetting) {
+                    RainbowColorManager.addColorSetting((Setting<SettingColor>) setting);
+                }
+            }
+        }
+    }
+
+    private void initCombat() {
+        addModule(new Auto32K());
+        addModule(new AntiFriendHit());
+        addModule(new Criticals());
+        addModule(new AutoTotem());
+        addModule(new BedAura());
+        addModule(new AutoWeapon());
+        addModule(new AutoLog());
+        addModule(new KillAura());
+        addModule(new CrystalAura());
+        addModule(new OffhandExtra());
+        addModule(new SmartSurround());
+        addModule(new Surround());
+        addModule(new Trigger());
+        addModule(new AimAssist());
+        addModule(new AutoArmor());
+        addModule(new AntiBed());
+        addModule(new AnchorAura());
+        addModule(new TotemPopNotifier());
+        addModule(new BowSpam());
+        addModule(new AutoTrap());
+        addModule(new AutoAnvil());
+        addModule(new SelfTrap());
+        addModule(new SelfWeb());
+        addModule(new AutoWeb());
+        addModule(new HoleFiller());
+        addModule(new SelfAnvil());
+        addModule(new AntiAutoAnvil());
+        addModule(new AutoCity());
+        addModule(new Swarm());
+        addModule(new Quiver());
+    }
+
+    private void initPlayer() {
+        addModule(new AutoFish());
+        addModule(new DeathPosition());
+        addModule(new FastUse());
+        addModule(new AutoRespawn());
+        addModule(new AutoMend());
+        addModule(new AutoGap());
+        addModule(new AutoReplenish());
+        addModule(new AntiHunger());
+        addModule(new AutoTool());
+        addModule(new AutoEat());
+        addModule(new AutoMount());
+        addModule(new EXPThrower());
+        addModule(new MiddleClickExtra());
+        addModule(new AutoDrop());
+        addModule(new AutoClicker());
+        addModule(new Portals());
+        addModule(new Reach());
+        addModule(new PotionSpoof());
+        addModule(new LiquidInteract());
+        addModule(new MountBypass());
+        addModule(new PacketMine());
+        addModule(new XCarry());
+        addModule(new BuildHeight());
+        addModule(new Rotation());
+        addModule(new ChestSwap());
+        addModule(new NoMiningTrace());
+        addModule(new EndermanLook());
+        addModule(new SpeedMine());
+        addModule(new NoBreakDelay());
+        addModule(new AntiCactus());
+        addModule(new FakePlayer());
+        addModule(new NameProtect());
+        addModule(new InfinityMiner());
+        addModule(new AntiAFK());
+        addModule(new NoInteract());
+        addModule(new NoRotate());
+        addModule(new Trail());
+    }
+
+    private void initMovement() {
+        addModule(new AutoSprint());
+        addModule(new AutoWalk());
+        addModule(new Blink());
+        addModule(new FastLadder());
+        addModule(new NoFall());
+        addModule(new Spider());
+        addModule(new AutoJump());
+        addModule(new Flight());
+        addModule(new Velocity());
+        addModule(new ElytraPlus());
+        addModule(new EntityControl());
+        addModule(new HighJump());
+        addModule(new Speed());
+        addModule(new SafeWalk());
+        addModule(new Parkour());
+        addModule(new Step());
+        addModule(new Jesus());
+        addModule(new AirJump());
+        addModule(new AntiLevitation());
+        addModule(new Scaffold());
+        addModule(new BoatFly());
+        addModule(new NoSlow());
+        addModule(new GuiMove());
+        addModule(new Anchor());
+        addModule(new ClickTP());
+        addModule(new EntitySpeed());
+        addModule(new ReverseStep());
+        addModule(new Timer());
+    }
+
+    private void initRender() {
+        addModule(new HUD());
+        addModule(new FullBright());
+        addModule(new StorageESP());
+        addModule(new XRay());
+        addModule(new ESP());
+        addModule(new Freecam());
+        addModule(new Tracers());
+        addModule(new Nametags());
+        addModule(new HoleESP());
+        addModule(new LogoutSpots());
+        addModule(new Trajectories());
+        addModule(new Chams());
+        addModule(new CameraClip());
+        addModule(new Search());
+        addModule(new EntityOwner());
+        addModule(new NoRender());
+        addModule(new Breadcrumbs());
+        addModule(new BlockSelection());
+        addModule(new BreakIndicators());
+        addModule(new CustomFOV());
+        addModule(new HandView());
+        addModule(new Time());
+        addModule(new VoidESP());
+        addModule(new CityESP());
+        addModule(new ShulkerPeek());
+        addModule(new ParticleBlocker());
+        addModule(new UnfocusedCPU());
+    }
+
+    private void initMisc() {
+        addModule(new AutoSign());
+        addModule(new AutoReconnect());
+        addModule(new AutoShearer());
+        addModule(new AutoNametag());
+        addModule(new BookBot());
+        addModule(new EChestFarmer());
+        addModule(new MiddleClickFriend());
+        addModule(new StashFinder());
+        addModule(new AutoBrewer());
+        addModule(new AutoSmelter());
+        addModule(new Spam());
+        addModule(new ItemByteSize());
+        addModule(new PacketCanceller());
+        addModule(new EntityLogger());
+        addModule(new EChestPreview());
+        addModule(new MessageAura());
+        addModule(new Nuker());
+        addModule(new SoundBlocker());
+        addModule(new AntiPacketKick());
+        addModule(new Announcer());
+        addModule(new BetterChat());
+        addModule(new OffhandCrash());
+        addModule(new LiquidFiller());
+        addModule(new VisualRange());
+        addModule(new AutoBreed());
+    }
+
+    public static class ModuleRegistry extends Registry<ToggleModule> {
+        public ModuleRegistry() {
+            super(RegistryKey.ofRegistry(new Identifier("pollux-client", "modules")), Lifecycle.stable());
+        }
+
+        @Nullable
+        @Override
+        public Identifier getId(ToggleModule entry) {
+            return null;
+        }
+
+        @Override
+        public Optional<RegistryKey<ToggleModule>> getKey(ToggleModule entry) {
+            return Optional.empty();
+        }
+
+        @Override
+        public int getRawId(@Nullable ToggleModule entry) {
+            return 0;
+        }
+
+        @Nullable
+        @Override
+        public ToggleModule get(@Nullable RegistryKey<ToggleModule> key) {
+            return null;
+        }
+
+        @Nullable
+        @Override
+        public ToggleModule get(@Nullable Identifier id) {
+            return null;
+        }
+
+        @Override
+        protected Lifecycle getEntryLifecycle(ToggleModule object) {
+            return null;
+        }
+
+        @Override
+        public Lifecycle getLifecycle() {
+            return null;
+        }
+
+        @Override
+        public Set<Identifier> getIds() {
+            return null;
+        }
+
+        @Override
+        public Set<Map.Entry<RegistryKey<ToggleModule>, ToggleModule>> getEntries() {
+            return null;
+        }
+
+        @Override
+        public boolean containsId(Identifier id) {
+            return false;
+        }
+
+        @Nullable
+        @Override
+        public ToggleModule get(int index) {
+            return null;
+        }
+
+        @Override
+        public Iterator<ToggleModule> iterator() {
+            return new ToggleModuleIterator();
+        }
+
+        private static class ToggleModuleIterator implements Iterator<ToggleModule> {
+            private final Iterator<Module> iterator = ModuleManager.INSTANCE.getAll().iterator();
+
+            @Override
+            public boolean hasNext() {
+                return iterator.hasNext();
+            }
+
+            @Override
+            public ToggleModule next() {
+                return (ToggleModule) iterator.next();
+            }
+        }
+    }
+}

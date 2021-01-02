@@ -1,0 +1,417 @@
+/*
+ * This file is part of the Pollux Client distribution (https://github.com/PolluxDevelopment/pollux-client/).
+ * Copyright (c) 2020 Pollux Development.
+ */
+
+package rardoger.polluxclient.modules.render;
+
+//Updated by squidoodly 03/07/2020
+//Updated by squidoodly 30/07/2020
+
+import me.zero.alpine.listener.EventHandler;
+import me.zero.alpine.listener.Listener;
+import rardoger.polluxclient.PolluxClient;
+import rardoger.polluxclient.events.render.RenderEvent;
+import rardoger.polluxclient.friends.FriendManager;
+import rardoger.polluxclient.mixininterface.IBakedQuad;
+import rardoger.polluxclient.modules.Category;
+import rardoger.polluxclient.modules.ModuleManager;
+import rardoger.polluxclient.modules.ToggleModule;
+import rardoger.polluxclient.modules.player.FakePlayer;
+import rardoger.polluxclient.modules.player.NameProtect;
+import rardoger.polluxclient.rendering.DrawMode;
+import rardoger.polluxclient.rendering.Matrices;
+import rardoger.polluxclient.rendering.MeshBuilder;
+import rardoger.polluxclient.settings.*;
+import rardoger.polluxclient.utils.Utils;
+import rardoger.polluxclient.utils.entity.FakePlayerEntity;
+import rardoger.polluxclient.utils.render.color.Color;
+import rardoger.polluxclient.utils.render.color.SettingColor;
+import net.minecraft.client.network.PlayerListEntry;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.VertexFormats;
+import net.minecraft.client.render.model.BakedQuad;
+import net.minecraft.client.texture.Sprite;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.EnchantmentHelper;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.DyeableArmorItem;
+import net.minecraft.item.ItemStack;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.registry.Registry;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Nametags extends ToggleModule {
+    public enum Position {
+        ABOVE,
+        ON_TOP
+    }
+
+    private static final MeshBuilder MB = new MeshBuilder(2048);
+
+    private static final Color BACKGROUND = new Color(0, 0, 0, 75);
+    private static final Color WHITE = new Color(255, 255, 255);
+
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgColors = settings.createGroup("Colors");
+
+    private final Setting<Boolean> displayArmor = sgGeneral.add(new BoolSetting.Builder()
+            .name("display-armor")
+            .description("Displays armor.")
+            .defaultValue(true)
+            .build()
+    );
+
+    private final Setting<Boolean> displayArmorEnchants = sgGeneral.add(new BoolSetting.Builder()
+            .name("display-armor-enchants")
+            .description("Display armor enchantments.")
+            .defaultValue(true)
+            .build()
+    );
+
+    private final Setting<Position> displayOnItem = sgGeneral.add(new EnumSetting.Builder<Position>()
+            .name("enchantment-position")
+            .description("Where the enchantments are rendered.")
+            .defaultValue(Position.ON_TOP)
+            .build()
+    );
+
+    private final Setting<List<Enchantment>> displayedEnchantments = sgGeneral.add(new EnchListSetting.Builder()
+            .name("displayed-enchantments")
+            .description("The enchantments that are shown on nametags.")
+            .defaultValue(setDefualtList())
+            .build()
+    );
+
+    private final Setting<Boolean> displayPing = sgGeneral.add(new BoolSetting.Builder()
+            .name("ping")
+            .description("Shows the player's ping.")
+            .defaultValue(true)
+            .build()
+    );
+
+    private final Setting<Double> scale = sgGeneral.add(new DoubleSetting.Builder()
+            .name("scale")
+            .description("The scale.")
+            .defaultValue(1)
+            .min(0.1)
+            .build()
+    );
+
+    private final Setting<Double> enchantTextScale = sgGeneral.add(new DoubleSetting.Builder()
+            .name("enchant-text-scale")
+            .description("The scale of the enchantment text.")
+            .defaultValue(0.6)
+            .min(0.1)
+            .max(1)
+            .sliderMin(0.1)
+            .sliderMax(1)
+            .build()
+    );
+
+    private final Setting<Boolean> yourself = sgGeneral.add(new BoolSetting.Builder()
+            .name("yourself")
+            .description("Displays a nametag on your player if you're in Freecam.")
+            .defaultValue(true)
+            .build()
+    );
+
+    private final Setting<SettingColor> normalName = sgColors.add(new ColorSetting.Builder()
+            .name("normal-color")
+            .description("The color of people not in your Friends List.")
+            .defaultValue(new SettingColor(255, 255, 255))
+            .build()
+    );
+
+    private final Setting<SettingColor> pingColor = sgColors.add(new ColorSetting.Builder()
+            .name("ping-color")
+            .description("The color of the ping text.")
+            .defaultValue(new SettingColor(150, 150, 150))
+            .build()
+    );
+
+    private final Setting<SettingColor> healthStage1 = sgColors.add(new ColorSetting.Builder()
+            .name("health-stage-1")
+            .description("The color if a player is full health.")
+            .defaultValue(new SettingColor(25, 252, 25))
+            .build()
+    );
+
+    private final Setting<SettingColor> healthStage2 = sgColors.add(new ColorSetting.Builder()
+            .name("health-stage-2")
+            .description("The color if a player is at two-thirds health.")
+            .defaultValue(new SettingColor(255, 105, 25))
+            .build()
+    );
+
+    private final Setting<SettingColor> healthStage3 = sgColors.add(new ColorSetting.Builder()
+            .name("health-stage-3")
+            .description("The color of a player if they are at one-third health.")
+            .defaultValue(new SettingColor(255, 25, 25))
+            .build()
+    );
+
+    private final Setting<SettingColor> enchantmentTextColor = sgColors.add(new ColorSetting.Builder()
+            .name("enchantment-text-color")
+            .description("The color of the enchantment text.")
+            .defaultValue(new SettingColor(255, 255, 255))
+            .build()
+    );
+
+    public Nametags() {
+        super(Category.Render, "nametags", "Displays customizable nametags above players.");
+    }
+
+    String name;
+
+    @EventHandler
+    private final Listener<RenderEvent> onRender = new Listener<>(event -> {
+        for (Entity entity : mc.world.getEntities()) {
+            boolean a = !ModuleManager.INSTANCE.isActive(Freecam.class);
+            if (!(entity instanceof PlayerEntity) || (a && entity == mc.player) || (a && entity == mc.cameraEntity)) continue;
+            if (!yourself.get() && entity.getUuid().equals(mc.player.getUuid())) continue;
+
+            renderNametag(event, (PlayerEntity) entity);
+        }
+    });
+
+    private void renderNametag(RenderEvent event, PlayerEntity entity) {
+        Camera camera = mc.gameRenderer.getCamera();
+
+        // Compute scale
+        double dist = Utils.distanceToCamera(entity);
+        double scale = 0.04 * this.scale.get();
+        if(dist > 15){
+            scale *= dist/15;
+        }
+
+        int ping;
+        try {
+            // Get ping
+            PlayerListEntry playerListEntry = mc.getNetworkHandler().getPlayerListEntry(entity.getUuid());
+            ping = playerListEntry.getLatency();
+        }catch(NullPointerException ignored){
+            ping = 0;
+        }
+
+        // Compute health things
+        float absorption = entity.getAbsorptionAmount();
+        int health = Math.round(entity.getHealth() + absorption);
+        double healthPercentage = health / (entity.getMaxHealth() + absorption);
+
+        if (entity == mc.player && ModuleManager.INSTANCE.get(NameProtect.class).isActive()) {
+            name = ModuleManager.INSTANCE.get(NameProtect.class).getName(entity.getGameProfile().getName());
+        } else if (ModuleManager.INSTANCE.get(FakePlayer.class).isActive() && entity instanceof FakePlayerEntity && ModuleManager.INSTANCE.get(FakePlayer.class).showID()) {
+            name = entity.getGameProfile().getName() + " [" + ModuleManager.INSTANCE.get(FakePlayer.class).getID((FakePlayerEntity) entity) + "]";
+        } else name = entity.getGameProfile().getName();
+
+        String healthText = " " + health;
+        String pingText = "[" + ping + "]";
+
+        // Setup the rotation
+        Matrices.push();
+        double x = entity.prevX + (entity.getX() - entity.prevX) * event.tickDelta;
+        double y = entity.prevY + (entity.getY() - entity.prevY) * event.tickDelta + entity.getHeight() + 0.5;
+        double z = entity.prevZ + (entity.getZ() - entity.prevZ) * event.tickDelta;
+        Matrices.translate(x - event.offsetX, y - event.offsetY, z - event.offsetZ);
+        Matrices.rotate(-camera.getYaw(), 0, 1, 0);
+        Matrices.rotate(camera.getPitch(), 1, 0, 0);
+        Matrices.scale(-scale, -scale, scale);
+
+        // Get armor info
+        double[] armorWidths = new double[4];
+        boolean hasArmor = false;
+        int maxEnchantCount = 0;
+        if (displayArmor.get() || displayArmorEnchants.get()) {
+            PolluxClient.FONT_2X.scale = 0.5 * enchantTextScale.get();
+            for (int i = 0; i < 4; i++) {
+                ItemStack itemStack = entity.inventory.armor.get(i);
+                Map<Enchantment, Integer> enchantments = EnchantmentHelper.get(itemStack);
+                Map<Enchantment, Integer> enchantmentsToShowScale = new HashMap<>();
+                for (Enchantment enchantment : displayedEnchantments.get()) {
+                    if (enchantments.containsKey(enchantment)) {
+                        enchantmentsToShowScale.put(enchantment, enchantments.get(enchantment));
+                    }
+                }
+
+                if (armorWidths[i] == 0) armorWidths[i] = 16;
+                if (!itemStack.isEmpty() && displayArmor.get()) hasArmor = true;
+
+                if (displayArmorEnchants.get()) {
+                    for (Enchantment enchantment : enchantmentsToShowScale.keySet()) {
+                        String enchantName = Utils.getEnchantShortName(enchantment) + " " + enchantmentsToShowScale.get(enchantment);
+                        armorWidths[i] = Math.max(armorWidths[i], PolluxClient.FONT_2X.getStringWidth(enchantName));
+                    }
+
+                    maxEnchantCount = Math.max(maxEnchantCount, enchantmentsToShowScale.size());
+                }
+            }
+            PolluxClient.FONT_2X.scale = 0.5;
+        }
+
+        // Setup size
+        double nameWidth = PolluxClient.FONT_2X.getStringWidth(name);
+        double healthWidth = PolluxClient.FONT_2X.getStringWidth(healthText);
+        double pingWidth = PolluxClient.FONT_2X.getStringWidth(pingText);
+        double width = nameWidth + healthWidth;
+        if(displayPing.get()){
+            width += pingWidth;
+        }
+        double armorWidth = 0;
+        for (double v : armorWidths) armorWidth += v;
+        width = Math.max(width, armorWidth);
+        double widthHalf = width / 2;
+
+        double heightDown = PolluxClient.FONT_2X.getHeight();
+        double armorHeight = (hasArmor ? 16 : 0);
+        armorHeight = Math.max(armorHeight, maxEnchantCount * PolluxClient.FONT_2X.getHeight() * enchantTextScale.get());
+        double heightUp = armorHeight;
+
+        // Render background
+        MB.texture = false;
+        MB.begin(null, DrawMode.Triangles, VertexFormats.POSITION_COLOR);
+        MB.quad(-widthHalf - 1, -1, 0, -widthHalf - 1, heightDown, 0, widthHalf + 1, heightDown, 0, widthHalf + 1, -1, 0, BACKGROUND);
+        MB.end();
+
+        // Render armor
+        double itemSpacing = (width - armorWidth) / 4;
+        if (hasArmor) {
+            double itemX = -widthHalf;
+            MB.texture = true;
+            MB.begin(null, DrawMode.Triangles, VertexFormats.POSITION_TEXTURE_COLOR);
+
+            boolean isDamaged = false;
+
+            for (int i = 0; i < 4; i++) {
+                ItemStack itemStack = entity.inventory.armor.get(i);
+
+                if (itemStack.isDamaged()) isDamaged = true;
+
+                for (BakedQuad quad : mc.getItemRenderer().getModels().getModel(itemStack).getQuads(null, null, null)) {
+                    Sprite sprite = ((IBakedQuad) quad).getSprite();
+
+                    if (itemStack.getItem() instanceof DyeableArmorItem) {
+                        int c = ((DyeableArmorItem) itemStack.getItem()).getColor(itemStack);
+
+                        WHITE.r = Color.toRGBAR(c);
+                        WHITE.g = Color.toRGBAG(c);
+                        WHITE.b = Color.toRGBAB(c);
+                    }
+
+                    double preItemX = itemX;
+                    itemX += (armorWidths[i] - 16) / 2;
+                    double addY = (armorHeight - 16) / 2;
+
+                    MB.texQuad(itemX, -heightUp + addY, 16, 16, sprite.getMinU(), sprite.getMinV(), sprite.getMaxU() - sprite.getMinU(), sprite.getMaxV() - sprite.getMinV(), WHITE, WHITE, WHITE, WHITE);
+
+                    itemX = preItemX;
+                    WHITE.r = WHITE.g = WHITE.b = 255;
+                }
+
+                itemX += armorWidths[i] + itemSpacing;
+            }
+            mc.getTextureManager().bindTexture(PlayerScreenHandler.BLOCK_ATLAS_TEXTURE);
+            MB.end();
+
+            // Durability
+            if (isDamaged) {
+                itemX = -widthHalf;
+                MB.texture = false;
+                MB.begin(null, DrawMode.Triangles, VertexFormats.POSITION_COLOR);
+
+                for (int i = 0; i < 4; i++) {
+                    ItemStack itemStack = entity.inventory.armor.get(i);
+
+                    double damage = Math.max(0, itemStack.getDamage());
+                    double maxDamage = itemStack.getMaxDamage();
+                    double percentage = Math.max(0.0F, (maxDamage - damage) / maxDamage);
+
+                    double j = Math.round(13.0F - damage * 13.0F / maxDamage);
+                    int k = MathHelper.hsvToRgb((float) (percentage / 3.0), 1, 1);
+
+                    double preItemX = itemX;
+                    itemX += (armorWidths[i] - 17) / 2;
+                    double addY = (armorHeight - 16) / 2;
+
+                    WHITE.r = WHITE.g = WHITE.b = 0;
+                    MB.quad(itemX + 2, -heightUp + 13 + addY, 0, itemX + 2 + 13, -heightUp + 13 + addY, 0, itemX + 2 + 13, -heightUp + 2 + 13 + addY, 0, itemX + 2, -heightUp + 2 + 13 + addY, 0, WHITE);
+
+                    WHITE.r = k >> 16 & 255;
+                    WHITE.g = k >> 8 & 255;
+                    WHITE.b = k & 255;
+                    MB.quad(itemX + 2, -heightUp + 13 + addY, 0, itemX + 2 + j, -heightUp + 13 + addY, 0, itemX + 2 + j, -heightUp + 1 + 13 + addY, 0, itemX + 2, -heightUp + 1 + 13 + addY, 0, WHITE);
+
+                    WHITE.r = WHITE.g = WHITE.b = 255;
+                    itemX = preItemX;
+
+                    itemX += armorWidths[i] + itemSpacing;
+                }
+
+                MB.end();
+            }
+        }
+
+        // Get health color
+        Color healthColor;
+        if (healthPercentage <= 0.333) healthColor = healthStage3.get();
+        else if (healthPercentage <= 0.666) healthColor = healthStage2.get();
+        else healthColor = healthStage1.get();
+
+        // Render name, health enchant and texts
+        PolluxClient.FONT_2X.begin();
+        double hX = PolluxClient.FONT_2X.renderStringWithShadow(name, -widthHalf, 0, FriendManager.INSTANCE.getColor(entity, normalName.get()));
+        PolluxClient.FONT_2X.renderStringWithShadow(healthText, hX + (width - nameWidth - healthWidth), 0, healthColor);
+        if (displayPing.get()) PolluxClient.FONT_2X.renderStringWithShadow(pingText, hX + 3, 0, pingColor.get());
+        double itemX = -widthHalf;
+
+        if (maxEnchantCount > 0) {
+            PolluxClient.FONT_2X.scale = 0.5 * enchantTextScale.get();
+
+            for (int i = 0; i < 4; i++) {
+                ItemStack itemStack = entity.inventory.armor.get(i);
+                Map<Enchantment, Integer> enchantments = EnchantmentHelper.get(itemStack);
+                Map<Enchantment, Integer> enchantmentsToShow = new HashMap<>();
+                for (Enchantment enchantment : displayedEnchantments.get()) {
+                    if (enchantments.containsKey(enchantment)) {
+                        enchantmentsToShow.put(enchantment, enchantments.get(enchantment));
+                    }
+                }
+
+                double aW = armorWidths[i];
+                double enchantY = 0;
+                double addY = (armorHeight - enchantmentsToShow.size() * PolluxClient.FONT_2X.getHeight()) / 2;
+                if (displayOnItem.get() == Position.ABOVE) {
+                    addY -= 16;
+                }
+
+                for (Enchantment enchantment : enchantmentsToShow.keySet()) {
+                    String enchantName = Utils.getEnchantShortName(enchantment) + " " + enchantmentsToShow.get(enchantment);
+                    PolluxClient.FONT_2X.renderStringWithShadow(enchantName, itemX + ((aW - PolluxClient.FONT_2X.getStringWidth(enchantName)) / 2), -heightUp + enchantY + addY, enchantmentTextColor.get());
+
+                    enchantY += PolluxClient.FONT_2X.getHeight();
+                }
+
+                itemX += armorWidths[i] + itemSpacing;
+            }
+
+            PolluxClient.FONT_2X.scale = 0.5;
+        }
+        PolluxClient.FONT_2X.end();
+
+        Matrices.pop();
+    }
+
+    private List<Enchantment> setDefualtList(){
+        List<Enchantment> ench = new ArrayList<>();
+        for (Enchantment enchantment : Registry.ENCHANTMENT) {
+            ench.add(enchantment);
+        }
+        return ench;
+    }
+}

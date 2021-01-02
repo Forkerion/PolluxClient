@@ -1,0 +1,81 @@
+/*
+ * This file is part of the Pollux Client distribution (https://github.com/PolluxDevelopment/pollux-client/).
+ * Copyright (c) 2020 Pollux Development.
+ */
+
+package rardoger.polluxclient.modules.render;
+
+import me.zero.alpine.listener.EventHandler;
+import me.zero.alpine.listener.Listener;
+import rardoger.polluxclient.events.render.RenderEvent;
+import rardoger.polluxclient.modules.Category;
+import rardoger.polluxclient.modules.ToggleModule;
+import rardoger.polluxclient.rendering.Renderer;
+import rardoger.polluxclient.rendering.ShapeMode;
+import rardoger.polluxclient.settings.*;
+import rardoger.polluxclient.utils.render.color.SettingColor;
+import net.minecraft.block.BlockState;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.shape.VoxelShape;
+
+public class BlockSelection extends ToggleModule {
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+
+    private final Setting<Boolean> advanced = sgGeneral.add(new BoolSetting.Builder()
+            .name("advanced")
+            .description("Shows a more advanced outline on different types of shape blocks.")
+            .defaultValue(true)
+            .build()
+    );
+
+    private final Setting<ShapeMode> shapeMode = sgGeneral.add(new EnumSetting.Builder<ShapeMode>()
+            .name("shape-mode")
+            .description("How the shapes are rendered.")
+            .defaultValue(ShapeMode.Lines)
+            .build()
+    );
+
+    private final Setting<SettingColor> sideColor = sgGeneral.add(new ColorSetting.Builder()
+            .name("side-color")
+            .description("The side color.")
+            .defaultValue(new SettingColor(255, 255, 255, 50))
+            .build()
+    );
+
+    private final Setting<SettingColor> lineColor = sgGeneral.add(new ColorSetting.Builder()
+            .name("line-color")
+            .description("The line color.")
+            .defaultValue(new SettingColor(255, 255, 255, 255))
+            .build()
+    );
+
+    public BlockSelection() {
+        super(Category.Render, "block-selection", "Modifies how your block selection is rendered.");
+    }
+
+    @EventHandler
+    private final Listener<RenderEvent> onRender = new Listener<>(event -> {
+        if (mc.crosshairTarget == null || !(mc.crosshairTarget instanceof BlockHitResult)) return;
+
+        BlockPos pos = ((BlockHitResult) mc.crosshairTarget).getBlockPos();
+        BlockState state = mc.world.getBlockState(pos);
+        VoxelShape shape = state.getOutlineShape(mc.world, pos);
+
+        if (shape.isEmpty()) return;
+        Box box = shape.getBoundingBox();
+
+        if (advanced.get()) {
+            for (Box b : shape.getBoundingBoxes()) {
+                render(pos, b);
+            }
+        } else {
+            render(pos, box);
+        }
+    });
+
+    private void render(BlockPos pos, Box box) {
+        Renderer.boxWithLines(Renderer.NORMAL, Renderer.LINES, pos.getX() + box.minX, pos.getY() + box.minY, pos.getZ() + box.minZ, pos.getX() + box.maxX, pos.getY() + box.maxY, pos.getZ() + box.maxZ, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+    }
+}
